@@ -77,7 +77,7 @@ Count of `.c/.h` files in `src/`: 2.6 = 82, 2.8 = 84, 3.0 = 88, 5.0.5 = 122, 7.0
 The annotated trees are supposed to change only comments and whitespace.
 Exceptions we have found:
 
-- **7.0, `src/acl.c:1441-1443`**: `ACLGetCommandID()` calls
+- **7.0, [`redis7.0-chinese-annotated/src/acl.c:1441-1443`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/acl.c#L1441-L1443)**: `ACLGetCommandID()` calls
   `serverLogRaw(...)` and `raxShow(commandId)` every time it inserts a
   command. These calls came in with commit `1e196cef` ("rax 源码注释 (#113)",
   i.e. "rax source comments"), apparently left over from debugging. The effect
