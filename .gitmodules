@@ -1,0 +1,18 @@
+[submodule "redis-3.0-annotated"]
+	path = redis-3.0-annotated
+	url = https://github.com/huangz1990/redis-3.0-annotated.git
+[submodule "redis7.0-chinese-annotated"]
+	path = redis7.0-chinese-annotated
+	url = https://github.com/CN-annotation-team/redis7.0-chinese-annotated.git
+[submodule "annotated_redis_source"]
+	path = annotated_redis_source
+	url = https://github.com/huangzworks/annotated_redis_source.git
+[submodule "annotated-redis-2.8.2"]
+	path = annotated-redis-2.8.2
+	url = https://github.com/xkeyideal/annotated-redis-2.8.2.git
+[submodule "redis-internals"]
+	path = redis-internals
+	url = https://github.com/zpoint/redis-internals.git
+[submodule "redis"]
+	path = redis
+	url = https://github.com/redis/redis.git
