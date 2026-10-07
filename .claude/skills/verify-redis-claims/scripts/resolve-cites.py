@@ -54,7 +54,10 @@ BY_REPO.setdefault("huangz1990/redis-3.0-annotated", BY_REPO.get("huangzworks/re
 def show(tree, sha, path, a, b, ctx):
     r = git("show", f"{sha}:{path}", cwd=ROOT / tree)
     if r.returncode:
-        return None, r.stderr.strip()
+        # Shallow submodules don't have other commits (e.g. a release tag's).
+        return None, (r.stderr.strip().splitlines() or ["git show failed"])[-1] + \
+            f"  (commit not local? try: git -C {tree} fetch --depth 1 origin {sha})"
+
     lines = r.stdout.splitlines()
     if b > len(lines):
         return None, f"line {b} past end of file ({len(lines)} lines)"
@@ -111,7 +114,10 @@ def main():
         if p.suffix == ".md" and (p.exists() or (ROOT / p).exists()):
             note = p if p.exists() else ROOT / p
             items = list(cites_in(note))
-            src = str(note.resolve().relative_to(ROOT))
+            try:
+                src = str(note.resolve().relative_to(ROOT))
+            except ValueError:  # a draft outside the repo
+                src = str(note)
         else:
             m = re.fullmatch(r"([\w./-]+):(\d+)(?:-(\d+))?", t)
             if not m:
