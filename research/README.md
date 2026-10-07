@@ -18,6 +18,9 @@ material pulled in as submodules; don't edit it. Write your findings here.
   it into a GitHub permalink at the pinned submodule commit. In a note that
   cites one tree a lot, declare its base once with
   `<!-- code-base: redis7.0-chinese-annotated/src -->` and write just `` server.c:6836 `` (the double backticks here keep this example from being converted).
+  For a release that isn't the pinned commit, add the ref after `@`:
+  `<!-- code-base: redis/src @ 7.4.2 -->`. Links then point at that tag's
+  commit, which `permalink.py` fetches if the shallow submodule lacks it.
   Mermaid and other code blocks are left alone, since links don't render there.
   Run `scripts/permalink.py --check` before committing.
   Line numbers depend on the pinned submodule commit, so a bump of the

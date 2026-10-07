@@ -13,7 +13,8 @@ Handles both forms the repo uses:
 
 Source is read with `git show <sha>:<path>` from the submodule, so it is
 exactly the commit the link names. A link whose sha isn't the pinned commit
-is flagged. Output per cite:  note:LINE  label  ->  tree/path:A-B, then the code.
+is flagged unless it is the ref the note declares (`code-base: redis/src @ 7.4.2`).
+Output per cite:  note:LINE  label  ->  tree/path:A-B, then the code.
 Reading the code is still your job: this only puts it in front of you.
 """
 import argparse, re, signal, subprocess, sys
@@ -25,7 +26,9 @@ ROOT = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=Path(__f
 LINK_RE = re.compile(r"\[`(?P<label>[^`]+)`\]\((?P<url>https://github\.com/(?P<repo>[^/]+/[^/]+)/blob/"
                      r"(?P<sha>[0-9a-f]{7,40})/(?P<path>[^#)]+)#L(?P<a>\d+)(?:-L(?P<b>\d+))?)\)")
 PLAIN_RE = re.compile(r"(?<!\[)`(?P<path>[\w./-]+\.\w+):(?P<a>\d+)(?:-(?P<b>\d+))?`(?!\]\()")
-BASE_RE = re.compile(r"^\s*<!--\s*code-base:\s*(\S+?)\s*-->\s*$", re.M)
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts"))
+from permalink import BASE_RE, commit_for  # same marker syntax, same ref resolution
 
 
 def git(*a, cwd=ROOT):
@@ -80,6 +83,11 @@ def cites_in(note):
     text = note.read_text(encoding="utf-8")
     m = BASE_RE.search(text)
     base = m.group(1).rstrip("/") if m else None
+    ref_tree, ref_sha = None, None
+    if m and m.group(2):
+        ref_tree = split_tree(base + "/x")[0]
+        if ref_tree:
+            ref_sha = commit_for(ref_tree, m.group(2))
     fence = False
     for no, line in enumerate(text.splitlines(), 1):
         if re.match(r"^\s*(```|~~~)", line):
@@ -91,7 +99,8 @@ def cites_in(note):
             if not hit:
                 yield no, m["label"], None, None, m["path"], 0, 0, f"unknown repo {m['repo']}"; continue
             tree, pinned = hit
-            note_ = None if pinned.startswith(m["sha"]) else f"sha {m['sha'][:12]} is not the pinned {pinned[:12]}"
+            ok = pinned.startswith(m["sha"]) or (tree == ref_tree and ref_sha.startswith(m["sha"]))
+            note_ = None if ok else f"sha {m['sha'][:12]} is neither the pinned {pinned[:12]} nor the note's declared ref"
             a = int(m["a"]); b = int(m["b"] or a)
             yield no, m["label"], tree, m["sha"], m["path"], a, b, note_
         for m in PLAIN_RE.finditer(line):
@@ -100,7 +109,8 @@ def cites_in(note):
             a = int(m["a"]); b = int(m["b"] or a)
             if not tree:
                 yield no, m[0], None, None, full, a, b, "plain ref with no resolvable tree (no code-base marker?)"; continue
-            yield no, m[0], tree, SUBS[tree][1], path, a, b, "plain ref (not yet a permalink)"
+            sha = ref_sha if tree == ref_tree else SUBS[tree][1]
+            yield no, m[0], tree, sha, path, a, b, "plain ref (not yet a permalink)"
 
 
 def main():

@@ -73,10 +73,22 @@ Decide per claim how to settle it:
 | defaults | `CONFIG GET` on the live server **and** `config.c` |
 | command semantics / complexity | `src/commands/*.json` and redis.io docs |
 
-Don't run the server for everything — source is enough when the code is
-unambiguous. Run it when the claim depends on runtime state, ordering, or a
-default, or when you're about to call something wrong (a "wrong" verdict
-deserves a reproduction).
+**Run the server only when source can't settle it.** Most claims are settled
+by reading: a cite, a constant, an `if` whose condition is in plain sight, a
+flag that is never set anywhere (`grep` proves a negative across the tree).
+Building and tracing costs minutes per claim, so go dynamic only when:
+
+- the answer depends on runtime state, timing or interleaving (which event
+  fires first, whether a reply can overtake the AOF write);
+- it depends on an effective default (config file, `dynamic-hz`, `ulimit`
+  lowering `maxclients`) rather than a literal in the code;
+- you are about to call a claim **wrong** and a short reproduction would make
+  the verdict undeniable — one per wrong finding is enough.
+
+Stop once the evidence settles the claim. One clean reproduction beats an
+elaborate harness: if a counterexample needs SIGSTOP choreography or fault
+injection to show, write it up as source-backed and say what a reproduction
+would need, unless the user asked for it to be reproduced.
 
 ## 3. Build and run
 
@@ -113,6 +125,8 @@ $S/run-server.sh stop $RUNDIR
   `redis.log` instead.
 - Always stop what you start: `run-server.sh stop $RUNDIR`, or
   `run-server.sh stop-all $B` at the end. Leave servers you didn't start alone.
+- Most claims need only one build. Build a second version only when the
+  difference between versions is the point.
 
 ## 4. Report
 
@@ -132,7 +146,22 @@ The same steps apply in reverse: before writing a behavioral sentence, get the
 evidence, and put the condition in the sentence ("with `appendfsync always`",
 "in RESP2", "for non-master clients"). Cite the line that does the thing, not
 the function signature. Per `research/README.md`, mark your own interpretation
-as such, then run `python3 scripts/permalink.py` on the note.
+as such.
+
+Write citations as plain `` `file.c:123` `` and let `scripts/permalink.py` turn
+them into links — don't hand-write GitHub URLs. Declare the tree once at the
+top of the note:
+
+```markdown
+<!-- code-base: redis7.0-chinese-annotated/src -->   <!-- the pinned 7.0.5 tree -->
+<!-- code-base: redis/src @ 7.4.2 -->                <!-- upstream at a release tag -->
+```
+
+With `@ <tag>` the links point at that tag's commit (fetched on demand) and
+each line is checked against it, so build the same tag with `build-tree.sh
+redis 7.4.2` and the line numbers you read in gdb match the ones you cite.
+Then run `python3 scripts/permalink.py <note>` and `$S/resolve-cites.py <note>`
+to confirm every cited line says what the sentence claims.
 
 When editing an existing note to fix a finding, change only what the evidence
 supports, keep the original structure, and re-run `resolve-cites.py` and
