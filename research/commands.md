@@ -38,7 +38,7 @@ Requests are RESP arrays too: `SET name bob` is sent as
 | Command | Where it came up |
 |---|---|
 | `SET`, `GET` | the running example in [02-read-and-parse](architecture/request-lifecycle/02-read-and-parse.md); `set` → `setCommand` lookup in [00-startup](architecture/request-lifecycle/00-startup.md) |
-| `BLPOP`, `LPUSH` | blocked clients in [event-loop](architecture/event-loop.md) |
+| `BLPOP`, `LPUSH` | blocked clients in [event-loop](architecture/event-loop.md); explained in depth [below](#blpop-key-key--timeout) |
 | `AUTH`, `ACL ...` | `ACLInit()` in [00-startup](architecture/request-lifecycle/00-startup.md) |
 | `CONFIG SET` | the protected-mode error in [01-accept](architecture/request-lifecycle/01-accept.md) |
 | `MULTI`, `EXEC`, `WATCH` | `processCommand()` queues commands inside `MULTI` ([`server.c:4002`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/server.c#L4002)) |
@@ -109,48 +109,147 @@ so lists work well as queues.
 
 | Command | What it does | Example | Complexity | Code |
 |---|---|---|---|---|
-| `LPUSH key v [v ...]` | Insert at the head; returns the new length | `LPUSH queue job1` → `(integer) 1` | O(1) per element | [`t_list.c:407`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L407) |
+| `LPUSH key v [v ...]` | Insert at the head; returns the new length (details [below](#lpush-key-element-element-)) | `LPUSH queue job1` → `(integer) 1` | O(1) per element | [`t_list.c:407`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L407) |
 | `RPUSH key v [v ...]` | Insert at the tail | `RPUSH queue job2` → `(integer) 2` | O(1) per element | [`t_list.c:413`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L413) |
 | `LPOP key [count]` | Remove and return from the head | `LPOP queue` → `"job1"` | O(N) returned | [`t_list.c:872`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L872) |
 | `RPOP key [count]` | Remove and return from the tail | `RPOP queue` → `"job2"` | O(N) returned | [`t_list.c:878`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L878) |
 | `LRANGE key start stop` | Read a range; `0 -1` = everything | `LRANGE queue 0 -1` | O(S+N) | [`t_list.c:884`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L884) |
 
-### `BLPOP key [key ...] timeout`
+### `LPUSH key element [element ...]`
 
-**Blocking `LPOP`.** If one of the lists has an element, it pops it right away.
-Otherwise the client **waits**, for up to `timeout` seconds (`0` = forever,
-decimals allowed), until someone pushes to one of the keys.
+Inserts the elements at the **head** of the list and returns the new length.
+If the key doesn't exist, it creates an empty list first. If the key holds
+another type, it fails with `WRONGTYPE`. O(1) per element. Code:
+[`t_list.c:354`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L354).
+
+**Several elements go in one at a time, left to right.** Each one goes in at
+the head, so they end up in reverse order:
 
 ```
-# client B                          # client C
-BLPOP queue 5
-  (waiting...)
-                                    LPUSH queue job1  → (integer) 1
-1) "queue"      ← which list
-2) "job1"       ← the element
+LPUSH q a b c     → (integer) 3
+LRANGE q 0 -1     → 1) "c"  2) "b"  3) "a"
+```
 
-BLPOP queue 5
-  (5 seconds, nobody pushes)
+`RPUSH q a b c` keeps the order (`a b c`). All the elements go in within the
+same command, so no other client can see a half-pushed list.
+
+**Which end you pop from decides queue or stack:**
+
+| Push | Pop | Behaves as | `LPUSH q a b c`, then pop three times |
+|---|---|---|---|
+| `LPUSH` | `RPOP` / `BRPOP` | **queue** (FIFO) | `a`, `b`, `c` |
+| `RPUSH` | `LPOP` / `BLPOP` | **queue** (FIFO) | (with `RPUSH q a b c`) `a`, `b`, `c` |
+| `LPUSH` | `LPOP` / `BLPOP` | **stack** (LIFO) | `c`, `b`, `a` |
+
+So a worker queue is `LPUSH` + `BRPOP`, or `RPUSH` + `BLPOP`. `LPUSH` +
+`BLPOP` serves the **newest** job first.
+
+### `BLPOP key [key ...] timeout`
+
+**Blocking `LPOP`.** It returns a two-element array: which key the element
+came from, and the element. `timeout` is in seconds, decimals are allowed,
+and `0` means wait forever.
+
+1. **Some list is non-empty:** it checks the keys **left to right** and pops
+   from the first non-empty one. It never waits in this case.
+2. **All are empty or missing:** the client **waits**. Whichever of its keys
+   receives an element first wakes it up.
+3. **Timeout:** it replies `(nil)` (`*-1`, a null array).
+
+```
+# worker W                          # producer P
+BLPOP q 5
+  (no reply yet: W is blocked)
+                                    LPUSH q job1   → (integer) 1
+1) "q"        ← which key
+2) "job1"     ← the element
+
+BLPOP q 5
+  (nobody pushes for 5 s)
 (nil)
 ```
 
-This is a classic worker-queue pattern: producers `LPUSH`, workers `BLPOP`,
-with no busy polling. O(N) in the number of keys given. Code: [`t_list.c:1558`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1558).
+Code: `blpopCommand` [`t_list.c:1558`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1558) → `blockingPopGenericCommand`
+[`t_list.c:1475`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1475). `BRPOP` is the same, popping from the tail.
 
-How Redis implements it without blocking its own single thread:
+#### How blocking works
 
-1. `blpopCommand` finds the lists empty and sends no reply. It marks the
-   client `CLIENT_BLOCKED` and records which keys it waits on (`db->blocking_keys`).
-   The thread moves on to other clients.
-2. While blocked, `processInputBuffer()` stops parsing that client's further
-   commands ([02-read-and-parse](architecture/request-lifecycle/02-read-and-parse.md)).
-3. When an `LPUSH` makes the key ready, the waiting client is served right after
-   the `LPUSH` command finishes ([`server.c:4008`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/server.c#L4008)). Its reply goes into its output
-   buffer and is sent in the next `beforeSleep`.
-4. If nobody pushes in time, `handleBlockedClientsTimeout()` in `beforeSleep`
-   replies `(nil)` ([event-loop](architecture/event-loop.md)).
+The server has only one thread, so "blocking" can't mean the thread waits.
+It means the server **parks the client and doesn't reply yet**. Three
+structures do the bookkeeping:
 
-`BRPOP` is the same, popping from the tail.
+| Structure | Maps | Used for |
+|---|---|---|
+| `db->blocking_keys` | key → list of clients waiting on it, oldest first | finding who to wake |
+| `server.ready_keys` (+ `db->ready_keys` to deduplicate) | keys that got data since the last check | waking only for keys that changed |
+| `server.clients_timeout_table` (rax sorted by deadline) | deadline + client | timeouts. Not used for `timeout 0` |
+
+```mermaid
+sequenceDiagram
+    participant W as worker W
+    participant S as server (main thread)
+    participant P as producer P
+
+    W->>S: BLPOP q 0
+    Note over S: blockingPopGenericCommand t_list.c:1475<br/>q missing → blockForKeys() blocked.c:745<br/>append W to blocking_keys[q]<br/>flag CLIENT_BLOCKED, no reply
+    Note over S: serves other clients as usual.<br/>W's further commands are read but not run
+    P->>S: LPUSH q job1
+    Note over S: pushGenericCommand: q missing → dbAdd()<br/>→ signalKeyAsReady(q) db.c:193<br/>q goes into server.ready_keys<br/>push job1, reply length = 1
+    S-->>P: (integer) 1
+    Note over S: call() returns → ready_keys not empty →<br/>handleClientsBlockedOnKeys() server.c:4008
+    Note over S: for each client in blocking_keys[q], oldest first:<br/>pop one element, addReply to that client,<br/>propagate as LPOP q, unblockClient()
+    S-->>W: 1) "q" 2) "job1"
+    Note over S: both replies are sent from beforeSleep
+```
+
+What the source and our experiments show:
+
+- **One push wakes as many waiters as it has elements, oldest waiter first**
+  ([`blocked.c:289-290`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/blocked.c#L289-L290)). W1 blocked before W2, then `LPUSH q a b c`:
+
+  ```
+  LPUSH q a b c     → (integer) 3
+  W1 gets  q, "c"
+  W2 gets  q, "b"
+  LRANGE q 0 -1     → 1) "a"
+  ```
+
+- **`LPUSH`'s reply doesn't count what waiters take.** The waiters are served
+  only after `LPUSH` has finished and replied ([`t_list.c:393`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L393), then
+  [`server.c:4008`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/server.c#L4008)). With one waiter, `LPUSH q x` returns `(integer) 1`, yet
+  `EXISTS q` right after returns `0`: the waiter took `x` and the now-empty
+  list was deleted.
+- **Only a newly created key signals.** An empty list is deleted, so a client
+  can only be blocked on a missing key. A push that wakes it must create the
+  key, and `dbAdd()` is where `signalKeyAsReady()` is called ([`db.c:193`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/db.c#L193)).
+  `signalKeyAsReady()` ([`blocked.c:846`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/blocked.c#L846)) returns immediately when nobody is
+  blocked on the key, so pushes with no waiters cost nothing extra.
+- **Transactions and scripts are served at the end, and see the final
+  state.** `handleClientsBlockedOnKeys()` runs after the whole `EXEC`. With
+  `MULTI; LPUSH q t; LPOP q; EXEC`, the list is empty again by then. The
+  waiter isn't woken, and keeps waiting for the next push.
+- **Inside `MULTI` or a script, `BLPOP` never blocks.** Those contexts set
+  `CLIENT_DENY_BLOCKING`, so an empty list replies `(nil)` immediately, even
+  with `timeout 0` ([`t_list.c:1544`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1544)). Blocking there would stall the whole
+  server.
+- **Replicas and the AOF see `LPOP`, not `BLPOP`.** An immediate pop is
+  rewritten to `LPOP key` ([`t_list.c:1534`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1534)). A served waiter is propagated as
+  `LPOP key` ([`t_list.c:1397`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/t_list.c#L1397)). Replaying the AOF therefore never blocks. Our
+  AOF after the two-waiter test held `LPUSH q a b c`, `LPOP q`, `LPOP q`.
+- **Commands pipelined behind a `BLPOP` wait with it.** While a client is
+  blocked, its socket is still read, but nothing is parsed. When it is
+  unblocked, `unblockClient()` ([`blocked.c:179`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/blocked.c#L179)) queues it in
+  `server.unblocked_clients`. Then `processUnblockedClients()` in
+  `beforeSleep` ([`blocked.c:127`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/blocked.c#L127)) runs what it had sent meanwhile. Sending
+  `BLPOP q 0` + `PING` in one write returned nothing until a push, then the
+  `BLPOP` reply and `+PONG` together.
+- **Timeouts are checked once per loop iteration**, by
+  `handleBlockedClientsTimeout()` in `beforeSleep` ([`timeout.c:136`](https://github.com/CN-annotation-team/redis7.0-chinese-annotated/blob/e352dafc89b0fcdac3071145e7a99c37f3802452/src/timeout.c#L136)). The
+  `epoll_wait` timeout only accounts for timers, so on an idle server a
+  `timeout` can fire up to one `serverCron` tick late. `BLPOP q 0.5` returned
+  `(nil)` after 0.56 s with `hz 10`.
+
+Experiments were run on 7.0.5 built from this repo (`make MALLOC=libc`).
 
 ## Hashes
 

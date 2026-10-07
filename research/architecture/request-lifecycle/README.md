@@ -15,6 +15,7 @@ io-threads and the `connection` abstraction layer.
 | 03 | Executing the command: `processCommand` → `call` → `setCommand` | todo |
 | 04 | Writing the reply: `addReply`, `clients_pending_write`, `beforeSleep` | todo |
 | 05 | Releasing resources: `resetClient`, `freeClient`, `freeClientAsync`, `clientsCron` | todo |
+| — | [Memory of a request](request-memory.md): what each stage allocates, who owns it, when it is freed | done |
 
 ```mermaid
 flowchart LR

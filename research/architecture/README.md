@@ -12,7 +12,7 @@ a request flows through the server.
 
 - [ ] `overview.md`: process model, main data structures (`redisServer`, `redisClient` / `client`, `redisDb`), startup in `main()`
 - [x] [`event-loop.md`](event-loop.md): `ae` reactor, file vs. time events, `beforeSleep`, `serverCron`
-- [ ] [`request-lifecycle/`](request-lifecycle/README.md): startup, accept, read query, parse RESP, `processCommand`, `call`, reply buffers, write, free. Stages 00–02 written
+- [ ] [`request-lifecycle/`](request-lifecycle/README.md): startup, accept, read query, parse RESP, `processCommand`, `call`, reply buffers, write, free. Stages 00–02 and [request memory](request-lifecycle/request-memory.md) written
 - [ ] `object-system.md`: `robj`, encodings, reference counting, shared objects, LRU/LFU fields
 - [ ] `keyspace.md`: `redisDb`, expires dict, lazy and active expiry, eviction
 - [ ] `persistence.md`: RDB fork + copy-on-write, AOF write/fsync policies, AOF rewrite
